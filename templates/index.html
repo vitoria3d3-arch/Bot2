@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Binance Futures Bot</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;600;700&display=swap');
+
+  :root {
+    --bg: #0a0b0f;
+    --card: #12141c;
+    --border: #1e2130;
+    --text: #e0e0e8;
+    --dim: #6b6e82;
+    --green: #00e676;
+    --red: #ff5252;
+    --blue: #448aff;
+    --yellow: #ffd740;
+    --orange: #ff9100;
+    --green-bg: rgba(0,230,118,.08);
+    --red-bg: rgba(255,82,82,.08);
+    --blue-bg: rgba(68,138,255,.12);
+    --orange-bg: rgba(255,145,0,.10);
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    min-height: 100vh;
+  }
+
+  /* --- Header --- */
+  header {
+    padding: 18px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+  header h1 span { color: var(--yellow); }
+
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+
+  .server-ip {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 6px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: border-color .2s;
+    position: relative;
+  }
+  .server-ip:hover { border-color: var(--yellow); }
+  .ip-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: .5px;
+  }
+  .ip-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--yellow);
+    font-weight: 600;
+  }
+  .ip-copied {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--green);
+    opacity: 0;
+    transition: opacity .3s;
+    position: absolute;
+    right: 14px;
+    top: -18px;
+    background: var(--card);
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--green);
+    pointer-events: none;
+  }
+  .ip-copied.show { opacity: 1; }
+
+  /* --- Grid --- */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 24px 32px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  /* --- Slot card --- */
+  .slot {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+
+  .slot-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+
+  .slot-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .slot-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--dim);
+  }
+
+  .slot-badge {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .badge-stopped  { background: var(--border); color: var(--dim); }
+  .badge-running  { background: var(--green-bg); color: var(--green); }
+  .badge-error    { background: var(--red-bg); color: var(--red); }
+  .badge-starting { background: var(--blue-bg); color: var(--blue); }
+
+  /* --- Mode toggle --- */
+  .mode-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+  .mode-toggle .mode-label {
+    font-weight: 600;
+    letter-spacing: .5px;
+    transition: color .2s;
+  }
+  .mode-toggle .mode-label.active-live { color: var(--red); }
+  .mode-toggle .mode-label.active-demo { color: var(--orange); }
+  .mode-toggle .mode-label.inactive { color: var(--dim); }
+
+  .toggle-switch {
+    position: relative;
+    width: 40px;
+    height: 20px;
+    cursor: pointer;
+  }
+  .toggle-switch input { opacity:0; width:0; height:0; position:absolute; }
+  .toggle-track {
+    position: absolute;
+    inset: 0;
+    background: var(--red);
+    border-radius: 10px;
+    transition: background .3s;
+  }
+  .toggle-switch input:checked + .toggle-track { background: var(--orange); }
+  .toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform .3s;
+    pointer-events: none;
+  }
+  .toggle-switch input:checked ~ .toggle-thumb { transform: translateX(20px); }
+
+  /* --- Balance bar --- */
+  .balance-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    min-height: 28px;
+    flex-wrap: wrap;
+  }
+  .balance-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+  .balance-chip .asset { color: var(--dim); }
+  .balance-chip .amount { color: var(--green); font-weight: 600; }
+  .balance-chip .avail { color: var(--dim); font-size: 10px; }
+
+  .btn-connect {
+    background: var(--blue-bg);
+    border: 1px solid rgba(68,138,255,.3);
+    color: var(--blue);
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+    transition: background .2s;
+  }
+  .btn-connect:hover { background: rgba(68,138,255,.2); }
+  .btn-connect:disabled { opacity: .4; cursor: not-allowed; }
+
+  .balance-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .balance-error {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--red);
+  }
+
+  .mode-badge-small {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 700;
+    letter-spacing: .5px;
+    text-transform: uppercase;
+  }
+  .mode-live { background: var(--red-bg); color: var(--red); }
+  .mode-demo { background: var(--orange-bg); color: var(--orange); }
+
+  /* --- Form --- */
+  .form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .form-row.full { grid-template-columns: 1fr; }
+
+  label {
+    font-size: 11px;
+    color: var(--dim);
+    display: block;
+    margin-bottom: 3px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  input, select {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+    outline: none;
+    transition: border-color .2s;
+  }
+  input:focus, select:focus { border-color: var(--blue); }
+  input:disabled, select:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* --- Buttons --- */
+  .btn-row { display: flex; gap: 8px; margin-top: 12px; }
+
+  button {
+    flex: 1;
+    padding: 10px;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: 'Space Grotesk', sans-serif;
+    transition: opacity .2s;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  button:hover { opacity: .85; }
+  button:disabled { opacity: .3; cursor: not-allowed; }
+
+  .btn-start { background: var(--green); color: #000; }
+  .btn-stop  { background: var(--red); color: #fff; }
+
+  /* --- Log / info --- */
+  .log-box {
+    margin-top: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    height: 140px;
+    overflow-y: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--dim);
+  }
+  .log-box .entry { white-space: nowrap; }
+
+  .info-bar {
+    margin-top: 8px;
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .info-bar span  { color: var(--dim); }
+  .info-bar strong { color: var(--text); }
+
+  .log-box::-webkit-scrollbar { width: 4px; }
+  .log-box::-webkit-scrollbar-track { background: transparent; }
+  .log-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="status-dot"></div>
+  <h1>Binance Futures <span>Bot</span></h1>
+  <div class="server-ip" id="serverIp" onclick="copyIP()" title="Clique para copiar — use este IP no whitelist da API Binance">
+    <span class="ip-label">SERVER IP</span>
+    <span class="ip-value" id="ipValue">carregando...</span>
+    <span class="ip-copied" id="ipCopied">copiado!</span>
+  </div>
+</header>
+
+<div class="grid" id="slotsGrid"></div>
+
+<script>
+const SLOTS = 4;
+const slotActive = [false, false, false, false];
+
+function createSlotHTML(i) {
+  return `
+  <div class="slot" id="slot${i}">
+    <div class="slot-header">
+      <div class="slot-header-left">
+        <div class="slot-title">API SLOT #${i+1}</div>
+        <div class="slot-badge badge-stopped" id="badge${i}">Inativo</div>
+      </div>
+      <div class="mode-toggle" id="modeToggle${i}">
+        <span class="mode-label active-live" id="liveLabel${i}">LIVE</span>
+        <label class="toggle-switch" title="Alterne entre modo Real (Live) e Testnet (Demo)">
+          <input type="checkbox" id="mode${i}" onchange="onModeChange(${i})">
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+        <span class="mode-label inactive" id="demoLabel${i}">DEMO</span>
+      </div>
+    </div>
+
+    <div class="balance-bar" id="balBar${i}">
+      <button class="btn-connect" id="btnConnect${i}" onclick="fetchBalance(${i})">Conectar</button>
+      <span class="balance-status" id="balStatus${i}"></span>
+    </div>
+
+    <div class="form-row">
+      <div><label>API Key</label><input type="password" id="key${i}" placeholder="api key"></div>
+      <div><label>Secret</label><input type="password" id="sec${i}" placeholder="secret"></div>
+    </div>
+    <div class="form-row">
+      <div><label>Symbol (Par)</label><input id="sym${i}" value="BTCUSDC" placeholder="BTCUSDC"></div>
+      <div><label>Direção (Estratégia)</label>
+        <select id="dir${i}">
+          <option value="LONG">LONG (Compra→Venda)</option>
+          <option value="SHORT">SHORT (Venda→Compra)</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div><label>Variação % (TP)</label><input type="number" id="pct${i}" value="0.5" step="0.01" min="0.01" placeholder="Ex: 0.5"></div>
+      <div><label>Quantidade em USDC ($)</label><input type="number" id="qty${i}" value="10" step="1" min="1" placeholder="Ex: 100"></div>
+    </div>
+    <div class="form-row full">
+      <div><label>Leverage (Alavancagem)</label><input type="number" id="lev${i}" value="10" min="1" max="125" placeholder="Ex: 10"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-start" id="btnStart${i}" onclick="startSlot(${i})">▶ Iniciar</button>
+      <button class="btn-stop" id="btnStop${i}" onclick="stopSlot(${i})" disabled>■ Parar</button>
+    </div>
+    <div class="info-bar" id="info${i}">
+      <span>Ciclos: <strong id="cyc${i}">0</strong></span>
+      <span>Ordem: <strong id="ord${i}">—</strong></span>
+    </div>
+    <div class="log-box" id="log${i}"></div>
+  </div>`;
+}
+
+const grid = document.getElementById('slotsGrid');
+for (let i = 0; i < SLOTS; i++) grid.innerHTML += createSlotHTML(i);
+
+/* --- Mode toggle --- */
+function getMode(i) {
+  return document.getElementById('mode'+i).checked ? 'demo' : 'live';
+}
+
+function onModeChange(i) {
+  const isDemo = document.getElementById('mode'+i).checked;
+  const liveL  = document.getElementById('liveLabel'+i);
+  const demoL  = document.getElementById('demoLabel'+i);
+  if (isDemo) {
+    liveL.className = 'mode-label inactive';
+    demoL.className = 'mode-label active-demo';
+  } else {
+    liveL.className = 'mode-label active-live';
+    demoL.className = 'mode-label inactive';
+  }
+  // Clear balance on mode change
+  clearBalance(i);
+}
+
+/* --- Balance --- */
+function clearBalance(i) {
+  const bar = document.getElementById('balBar'+i);
+  // Remove old chips
+  bar.querySelectorAll('.balance-chip, .balance-error, .mode-badge-small').forEach(el => el.remove());
+  document.getElementById('balStatus'+i).textContent = '';
+  document.getElementById('btnConnect'+i).style.display = '';
+}
+
+async function fetchBalance(i) {
+  const apiKey = document.getElementById('key'+i).value.trim();
+  const secret = document.getElementById('sec'+i).value.trim();
+  if (!apiKey || !secret) return alert('Preencha API Key e Secret primeiro');
+
+  const btn = document.getElementById('btnConnect'+i);
+  const statusEl = document.getElementById('balStatus'+i);
+  btn.disabled = true;
+  statusEl.textContent = 'conectando...';
+  statusEl.className = 'balance-status';
+
+  // Remove old chips
+  const bar = document.getElementById('balBar'+i);
+  bar.querySelectorAll('.balance-chip, .balance-error, .mode-badge-small').forEach(el => el.remove());
+
+  const mode = getMode(i);
+  try {
+    const r = await fetch('/api/balance', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ api_key: apiKey, secret, mode }),
+    });
+    const d = await r.json();
+    btn.disabled = false;
+
+    if (d.error) {
+      statusEl.textContent = d.error;
+      statusEl.className = 'balance-error';
+      return;
+    }
+
+    statusEl.textContent = '';
+    btn.style.display = 'none';
+
+    // Mode badge
+    const modeBadge = document.createElement('span');
+    modeBadge.className = 'mode-badge-small ' + (mode === 'demo' ? 'mode-demo' : 'mode-live');
+    modeBadge.textContent = mode === 'demo' ? 'TESTNET' : 'LIVE';
+    bar.appendChild(modeBadge);
+
+    // Balance chips
+    const balances = d.balances || [];
+    if (balances.length === 0) {
+      const chip = document.createElement('span');
+      chip.className = 'balance-status';
+      chip.textContent = 'Sem saldo';
+      bar.appendChild(chip);
+    } else {
+      balances.forEach(b => {
+        const chip = document.createElement('span');
+        chip.className = 'balance-chip';
+        chip.innerHTML = '<span class="asset">' + esc(b.asset) + '</span>'
+          + '<span class="amount">' + esc(String(b.balance)) + '</span>'
+          + '<span class="avail">(disp: ' + esc(String(b.available)) + ')</span>';
+        bar.appendChild(chip);
+      });
+    }
+
+    // Add refresh button
+    const refreshBtn = document.createElement('button');
+    refreshBtn.className = 'btn-connect';
+    refreshBtn.textContent = '↻';
+    refreshBtn.title = 'Atualizar saldo';
+    refreshBtn.style.padding = '4px 8px';
+    refreshBtn.onclick = () => {
+      clearBalance(i);
+      fetchBalance(i);
+    };
+    bar.appendChild(refreshBtn);
+
+  } catch(e) {
+    btn.disabled = false;
+    statusEl.textContent = 'Erro de conexão';
+    statusEl.className = 'balance-error';
+  }
+}
+
+/* --- Input control --- */
+const INPUT_IDS = (i) => ['key'+i, 'sec'+i, 'sym'+i, 'dir'+i, 'pct'+i, 'qty'+i, 'lev'+i];
+
+function setInputsDisabled(i, disabled) {
+  INPUT_IDS(i).forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
+  });
+  document.getElementById('btnStart'+i).disabled = disabled;
+  document.getElementById('btnStop'+i).disabled = !disabled;
+  document.getElementById('mode'+i).disabled = disabled;
+  document.getElementById('btnConnect'+i).disabled = disabled;
+}
+
+/* --- Start / Stop --- */
+async function startSlot(i) {
+  const body = {
+    slot: i,
+    api_key: document.getElementById('key'+i).value,
+    secret:  document.getElementById('sec'+i).value,
+    symbol:  document.getElementById('sym'+i).value,
+    direction: document.getElementById('dir'+i).value,
+    pct:     document.getElementById('pct'+i).value,
+    qty:     document.getElementById('qty'+i).value,
+    leverage: document.getElementById('lev'+i).value,
+    mode:    getMode(i),
+  };
+  if (!body.api_key || !body.secret) return alert('Preencha API Key e Secret');
+  try {
+    const r = await fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if (d.error) alert(d.error);
+    else setInputsDisabled(i, true);
+  } catch(e) {
+    alert('Erro de conexão: ' + e.message);
+  }
+}
+
+async function stopSlot(i) {
+  try {
+    await fetch('/api/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:i})});
+  } catch(e) {
+    alert('Erro de conexão: ' + e.message);
+  }
+}
+
+/* --- Helpers --- */
+function esc(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+/* --- Polling --- */
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const data = await r.json();
+    data.forEach((s, i) => {
+      const badge = document.getElementById('badge'+i);
+      const isRunning = s.active && (s.status === 'running' || s.status === 'starting');
+
+      if (!s.active) {
+        badge.textContent = 'Inativo';
+        badge.className = 'slot-badge badge-stopped';
+        if (slotActive[i]) {
+          slotActive[i] = false;
+          setInputsDisabled(i, false);
+        }
+        return;
+      }
+
+      const st = s.status || 'unknown';
+      badge.textContent = st === 'running' ? 'Rodando' : st === 'error' ? 'Erro' : st === 'stopped' ? 'Parado' : st === 'starting' ? 'Iniciando' : st;
+      badge.className = 'slot-badge badge-' + (st === 'running' ? 'running' : st === 'error' ? 'error' : st === 'starting' ? 'starting' : 'stopped');
+
+      if (isRunning) {
+        slotActive[i] = true;
+        setInputsDisabled(i, true);
+      } else if (slotActive[i]) {
+        slotActive[i] = false;
+        setInputsDisabled(i, false);
+      }
+
+      document.getElementById('cyc'+i).textContent = s.cycles || 0;
+      const co = s.current_order;
+      document.getElementById('ord'+i).textContent = co ? co.side + ' @ ' + co.price : '—';
+
+      const logBox = document.getElementById('log'+i);
+      if (s.log && s.log.length) {
+        logBox.innerHTML = s.log.map(l => '<div class="entry">' + esc(l) + '</div>').join('');
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+    });
+  } catch(e) {}
+}
+
+setInterval(pollStatus, 2000);
+pollStatus();
+
+/* --- Server IP --- */
+async function fetchServerIP() {
+  try {
+    const r = await fetch('/api/server-ip');
+    const d = await r.json();
+    document.getElementById('ipValue').textContent = d.ip || 'unavailable';
+  } catch(e) {
+    document.getElementById('ipValue').textContent = 'erro';
+  }
+}
+
+function copyIP() {
+  const ip = document.getElementById('ipValue').textContent;
+  if (!ip || ip === 'carregando...' || ip === 'erro') return;
+  navigator.clipboard.writeText(ip).then(() => {
+    const el = document.getElementById('ipCopied');
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 1500);
+  });
+}
+
+fetchServerIP();
+</script>
+</body>
+</html>
