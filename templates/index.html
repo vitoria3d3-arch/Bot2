@@ -404,8 +404,9 @@ function createSlotHTML(i) {
       <div><label>Variação % (TP)</label><input type="number" id="pct${i}" value="0.5" step="0.01" min="0.01" placeholder="Ex: 0.5"></div>
       <div><label>Quantidade em USDC ($)</label><input type="number" id="qty${i}" value="10" step="1" min="1" placeholder="Ex: 100"></div>
     </div>
-    <div class="form-row full">
+    <div class="form-row">
       <div><label>Leverage (Alavancagem)</label><input type="number" id="lev${i}" value="10" min="1" max="125" placeholder="Ex: 10"></div>
+      <div><label>Preço de Entrada (Vazio = Auto)</label><input type="number" id="ep${i}" step="0.00000001" placeholder="Vazio = Atual"></div>
     </div>
     <div class="btn-row">
       <button class="btn-start" id="btnStart${i}" onclick="startSlot(${i})">▶ Iniciar</button>
@@ -553,6 +554,7 @@ async function startSlot(i) {
     pct:     document.getElementById('pct'+i).value,
     qty:     document.getElementById('qty'+i).value,
     leverage: document.getElementById('lev'+i).value,
+    entry_price: document.getElementById('ep'+i).value,
     mode:    getMode(i),
   };
   if (!body.api_key || !body.secret) return alert('Preencha API Key e Secret');

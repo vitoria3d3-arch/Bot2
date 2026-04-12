@@ -266,9 +266,16 @@ def bot_worker(slot_id: int):
 
         entry_side = "BUY" if direction == "LONG" else "SELL"
         
-        # Anchor the Cycle: Fetch mark price and calculate quantity once at the start
+        # Anchor the Cycle: Handle manual entry price or fetch mark price
         info = get_symbol_info(base_url, symbol)
-        initial_mark = get_mark_price(base_url, symbol)
+        
+        manual_entry = slot.get("entry_price")
+        if manual_entry and float(manual_entry) > 0:
+            initial_mark = float(manual_entry)
+            add_log(f"Usando Preço de Entrada Manual: {initial_mark}")
+        else:
+            initial_mark = get_mark_price(base_url, symbol)
+            add_log(f"Preço de Entrada Automático (Mark): {initial_mark}")
         
         intended_notional = usdc_amount * leverage
         asset_qty = round_step(intended_notional / initial_mark, info["step_size"])
@@ -517,6 +524,7 @@ def api_start():
             "leverage": leverage,
             "mode": mode,
             "base_url": base_url,
+            "entry_price": data.get("entry_price"),
             "running": True,
             "status": "starting",
             "cycles": 0,
