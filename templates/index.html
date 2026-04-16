@@ -260,6 +260,95 @@
   .mode-live { background: var(--red-bg); color: var(--red); }
   .mode-demo { background: var(--orange-bg); color: var(--orange); }
 
+  /* --- Trade Container --- */
+  .trades-container {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .trade-item {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    position: relative;
+    transition: border-color .2s;
+  }
+  .trade-item:hover { border-color: var(--border); }
+  
+  .trade-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+  }
+
+  .trade-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .trade-symbol {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--yellow);
+  }
+
+  .trade-params {
+    font-size: 10px;
+    color: var(--dim);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .trade-status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+
+  .btn-stop-small {
+    padding: 4px 10px;
+    font-size: 10px;
+    background: var(--red);
+    color: #fff;
+    border-radius: 4px;
+    text-transform: uppercase;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .add-trade-form {
+    background: var(--bg);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    margin-top: 12px;
+  }
+
+  .add-trade-form.hidden { display: none; }
+
+  .btn-add-toggle {
+    width: 100%;
+    background: var(--border);
+    color: var(--text);
+    padding: 8px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 12px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .btn-add-toggle:hover { background: var(--card); }
+
   /* --- Form --- */
   .form-row {
     display: grid;
@@ -391,32 +480,35 @@ function createSlotHTML(i) {
       <div><label>API Key</label><input type="password" id="key${i}" placeholder="api key"></div>
       <div><label>Secret</label><input type="password" id="sec${i}" placeholder="secret"></div>
     </div>
-    <div class="form-row">
-      <div><label>Symbol (Par)</label><input id="sym${i}" value="BTCUSDC" placeholder="BTCUSDC"></div>
-      <div><label>Direção (Estratégia)</label>
-        <select id="dir${i}">
-          <option value="LONG">LONG (Compra→Venda)</option>
-          <option value="SHORT">SHORT (Venda→Compra)</option>
-        </select>
+
+    <button class="btn-add-toggle" onclick="toggleAddForm(${i})">+ ADICIONAR NOVA OPERAÇÃO</button>
+
+    <div class="add-trade-form hidden" id="addForm${i}">
+      <div class="form-row">
+        <div><label>Symbol (Par)</label><input id="sym${i}" value="BTCUSDC" placeholder="BTCUSDC"></div>
+        <div><label>Direção</label>
+          <select id="dir${i}">
+            <option value="LONG">LONG</option>
+            <option value="SHORT">SHORT</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div><label>Variação % (TP)</label><input type="number" id="pct${i}" value="0.5" step="0.01" placeholder="0.5"></div>
+        <div><label>Margem USDC ($)</label><input type="number" id="qty${i}" value="10" step="1" placeholder="10"></div>
+      </div>
+      <div class="form-row">
+        <div><label>Leverage</label><input type="number" id="lev${i}" value="10" placeholder="10"></div>
+        <div><label>Preço Entrada (Opt)</label><input type="number" id="ep${i}" step="0.00000001" placeholder="Auto"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn-start" onclick="startTrade(${i})">Lançar Ordem</button>
       </div>
     </div>
-    <div class="form-row">
-      <div><label>Variação % (TP)</label><input type="number" id="pct${i}" value="0.5" step="0.01" min="0.01" placeholder="Ex: 0.5"></div>
-      <div><label>Quantidade em USDC ($)</label><input type="number" id="qty${i}" value="10" step="1" min="1" placeholder="Ex: 100"></div>
+
+    <div class="trades-container" id="trades${i}">
+      <!-- Trades will be injected here -->
     </div>
-    <div class="form-row">
-      <div><label>Leverage (Alavancagem)</label><input type="number" id="lev${i}" value="10" min="1" max="125" placeholder="Ex: 10"></div>
-      <div><label>Preço de Entrada (Vazio = Auto)</label><input type="number" id="ep${i}" step="0.00000001" placeholder="Vazio = Atual"></div>
-    </div>
-    <div class="btn-row">
-      <button class="btn-start" id="btnStart${i}" onclick="startSlot(${i})">▶ Iniciar</button>
-      <button class="btn-stop" id="btnStop${i}" onclick="stopSlot(${i})" disabled>■ Parar</button>
-    </div>
-    <div class="info-bar" id="info${i}">
-      <span>Ciclos: <strong id="cyc${i}">0</strong></span>
-      <span>Ordem: <strong id="ord${i}">—</strong></span>
-    </div>
-    <div class="log-box" id="log${i}"></div>
   </div>`;
 }
 
@@ -529,22 +621,13 @@ async function fetchBalance(i) {
   }
 }
 
-/* --- Input control --- */
-const INPUT_IDS = (i) => ['key'+i, 'sec'+i, 'sym'+i, 'dir'+i, 'pct'+i, 'qty'+i, 'lev'+i];
-
-function setInputsDisabled(i, disabled) {
-  INPUT_IDS(i).forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = disabled;
-  });
-  document.getElementById('btnStart'+i).disabled = disabled;
-  document.getElementById('btnStop'+i).disabled = !disabled;
-  document.getElementById('mode'+i).disabled = disabled;
-  document.getElementById('btnConnect'+i).disabled = disabled;
+function toggleAddForm(i) {
+  const form = document.getElementById('addForm'+i);
+  form.classList.toggle('hidden');
 }
 
 /* --- Start / Stop --- */
-async function startSlot(i) {
+async function startTrade(i) {
   const body = {
     slot: i,
     api_key: document.getElementById('key'+i).value,
@@ -558,19 +641,22 @@ async function startSlot(i) {
     mode:    getMode(i),
   };
   if (!body.api_key || !body.secret) return alert('Preencha API Key e Secret');
+  
   try {
     const r = await fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     const d = await r.json();
     if (d.error) alert(d.error);
-    else setInputsDisabled(i, true);
+    else {
+        toggleAddForm(i); // Hide form
+    }
   } catch(e) {
     alert('Erro de conexão: ' + e.message);
   }
 }
 
-async function stopSlot(i) {
+async function stopTrade(tradeId) {
   try {
-    await fetch('/api/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slot:i})});
+    await fetch('/api/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({trade_id:tradeId})});
   } catch(e) {
     alert('Erro de conexão: ' + e.message);
   }
@@ -583,52 +669,102 @@ function esc(str) {
   return div.innerHTML;
 }
 
-/* --- Polling --- */
-async function pollStatus() {
-  try {
-    const r = await fetch('/api/status');
-    const data = await r.json();
-    data.forEach((s, i) => {
-      const badge = document.getElementById('badge'+i);
-      const isRunning = s.active && (s.status === 'running' || s.status === 'starting');
+function createTradeItemHTML(t) {
+  return `
+  <div class="trade-item" data-id="${t.trade_id}">
+    <div class="trade-item-header">
+      <div class="trade-item-info">
+        <span class="trade-symbol">${t.symbol}</span>
+        <span class="trade-params">${t.direction} | ${t.pct}% | $${t.qty} | ${t.leverage}x</span>
+      </div>
+      <button class="btn-stop-small" onclick="stopTrade('${t.trade_id}')">PARAR</button>
+    </div>
+    
+    <div class="trade-status-row">
+      <span class="slot-badge badge-${t.status}">${t.status}</span>
+      <span style="color:var(--dim)">Ciclos: <strong class="cycles-count">${t.cycles}</strong></span>
+      <span style="color:var(--dim)">Ordem: <strong class="order-info">${t.current_order ? t.current_order.side + ' @ ' + t.current_order.price : '—'}</strong></span>
+    </div>
 
-      if (!s.active) {
-        badge.textContent = 'Inativo';
-        badge.className = 'slot-badge badge-stopped';
-        if (slotActive[i]) {
-          slotActive[i] = false;
-          setInputsDisabled(i, false);
-        }
-        return;
-      }
-
-      const st = s.status || 'unknown';
-      badge.textContent = st === 'running' ? 'Rodando' : st === 'error' ? 'Erro' : st === 'stopped' ? 'Parado' : st === 'starting' ? 'Iniciando' : st;
-      badge.className = 'slot-badge badge-' + (st === 'running' ? 'running' : st === 'error' ? 'error' : st === 'starting' ? 'starting' : 'stopped');
-
-      if (isRunning) {
-        slotActive[i] = true;
-        setInputsDisabled(i, true);
-      } else if (slotActive[i]) {
-        slotActive[i] = false;
-        setInputsDisabled(i, false);
-      }
-
-      document.getElementById('cyc'+i).textContent = s.cycles || 0;
-      const co = s.current_order;
-      document.getElementById('ord'+i).textContent = co ? co.side + ' @ ' + co.price : '—';
-
-      const logBox = document.getElementById('log'+i);
-      if (s.log && s.log.length) {
-        logBox.innerHTML = s.log.map(l => '<div class="entry">' + esc(l) + '</div>').join('');
-        logBox.scrollTop = logBox.scrollHeight;
-      }
-    });
-  } catch(e) {}
+    <div class="log-box" style="height: 80px; margin-top: 8px;">
+       ${t.log.map(l => '<div class="entry">' + esc(l) + '</div>').join('')}
+    </div>
+  </div>`;
 }
 
-setInterval(pollStatus, 2000);
-pollStatus();
+/* --- Real-Time Streaming (SSE) --- */
+function processData(data) {
+  data.forEach((slot, i) => {
+    const container = document.getElementById('trades'+i);
+    const trades = slot.trades || [];
+    const newIds = trades.map(t => t.trade_id);
+
+    // 1. Remove deleted trades
+    Array.from(container.children).forEach(el => {
+      const id = el.getAttribute('data-id');
+      if (!newIds.includes(id)) el.remove();
+    });
+
+    // 2. Update or Add
+    trades.forEach(t => {
+      let el = container.querySelector(`[data-id="${t.trade_id}"]`);
+      if (el) {
+        // Update status badge
+        const badge = el.querySelector('.slot-badge');
+        const badgeClass = `slot-badge badge-${t.status}`;
+        if (badge.className !== badgeClass) {
+          badge.className = badgeClass;
+          badge.textContent = t.status;
+        }
+        // Update Cycles
+        const cyc = el.querySelector('.cycles-count');
+        if (cyc.textContent !== String(t.cycles)) cyc.textContent = t.cycles;
+        
+        // Update Order Info
+        const ord = el.querySelector('.order-info');
+        const ordTxt = t.current_order ? t.current_order.side + ' @ ' + t.current_order.price : '—';
+        if (ord.textContent !== ordTxt) ord.textContent = ordTxt;
+
+        // Update Log
+        const logBox = el.querySelector('.log-box');
+        const logHtml = t.log.map(l => '<div class="entry">' + esc(l) + '</div>').join('');
+        if (logBox.innerHTML !== logHtml) {
+          const wasAtBottom = logBox.scrollHeight - logBox.clientHeight <= logBox.scrollTop + 5;
+          logBox.innerHTML = logHtml;
+          if (wasAtBottom) logBox.scrollTop = logBox.scrollHeight;
+        }
+      } else {
+        // Add new trade
+        container.insertAdjacentHTML('beforeend', createTradeItemHTML(t));
+        const newEl = container.querySelector(`[data-id="${t.trade_id}"]`);
+        const lb = newEl.querySelector('.log-box');
+        lb.scrollTop = lb.scrollHeight;
+      }
+    });
+  });
+}
+
+function initStreaming() {
+  console.log("Initializing Real-Time Stream...");
+  const source = new EventSource('/api/events');
+  
+  source.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      processData(data);
+    } catch(e) {
+      console.error("SSE Parse Error:", e);
+    }
+  };
+
+  source.onerror = (err) => {
+    console.warn("SSE connection lost, retrying...");
+    // Browser automatically handles reconnection for EventSource
+  };
+}
+
+// Start streaming when page loads
+initStreaming();
 
 /* --- Server IP --- */
 async function fetchServerIP() {

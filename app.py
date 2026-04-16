@@ -9,11 +9,14 @@ import hmac
 import hashlib
 import threading
 import logging
+import uuid
+import math
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 import requests
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
+import json
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -27,10 +30,14 @@ log = logging.getLogger("bot")
 app = Flask(__name__)
 
 # ---------------------------------------------------------------------------
-# In-memory state
+# In-memory state: multiple trades per API slot
 # ---------------------------------------------------------------------------
-slots = [None, None, None, None]
-slot_locks = [threading.Lock() for _ in range(4)]
+# active_trades maps trade_id -> trade_state_dict
+active_trades = {}
+# trade_locks maps trade_id -> lock
+trade_locks = {}
+# Store API credentials for each slot to make UI easier
+api_credentials = [None, None, None, None]
 
 URL_LIVE = "https://fapi.binance.com"
 URL_TESTNET = "https://testnet.binancefuture.com"
@@ -214,6 +221,13 @@ def cancel_all_orders(base_url: str, api_key: str, secret: str, symbol: str):
         return None
 
 
+def cancel_order(base_url: str, api_key: str, secret: str, symbol: str, order_id: int):
+    try:
+        return bn_delete(base_url, "/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, api_key, secret)
+    except Exception:
+        return None
+
+
 def get_order_status(
     base_url: str, api_key: str, secret: str, symbol: str, order_id: int
 ) -> str:
@@ -235,41 +249,46 @@ def set_leverage(base_url: str, api_key: str, secret: str, symbol: str, leverage
 # ---------------------------------------------------------------------------
 # Bot worker thread
 # ---------------------------------------------------------------------------
-def bot_worker(slot_id: int):
-    slot = slots[slot_id]
-    base_url = slot["base_url"]
-    api_key = slot["api_key"]
-    secret = slot["secret"]
-    symbol = slot["symbol"]
-    direction = slot["direction"]
-    pct = slot["pct"]
-    usdc_amount = slot["qty"]
-    leverage = slot["leverage"]
+# ---------------------------------------------------------------------------
+# Bot worker thread
+# ---------------------------------------------------------------------------
+def bot_worker(trade_id: str):
+    trade = active_trades.get(trade_id)
+    if not trade:
+        return
+
+    base_url = trade["base_url"]
+    api_key = trade["api_key"]
+    secret = trade["secret"]
+    symbol = trade["symbol"]
+    direction = trade["direction"]
+    pct = trade["pct"]
+    usdc_amount = trade["qty"]
+    leverage = trade["leverage"]
     mode_label = "TESTNET" if base_url == URL_TESTNET else "LIVE"
 
-    log.info(f"[Slot {slot_id}] Starting ({mode_label}): {symbol} {direction} {pct}% amount=${usdc_amount} USDC lev={leverage}x")
-    slot["status"] = "running"
-    slot["log"] = []
+    log.info(f"[{trade_id}] Starting ({mode_label}): {symbol} {direction} {pct}% amount=${usdc_amount} USDC lev={leverage}x")
+    trade["status"] = "running"
+    trade["log"] = []
 
     def add_log(msg: str):
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
         entry = f"[{ts}] {msg}"
-        slot["log"] = (slot["log"] or [])[-49:] + [entry]
-        log.info(f"[Slot {slot_id}] {msg}")
+        trade["log"] = (trade["log"] or [])[-29:] + [entry]
+        log.info(f"[{trade_id}] {msg}")
 
     add_log(f"Iniciando em {symbol} ({direction}) com ${usdc_amount} USDC")
 
     try:
         add_log(f"Modo: {mode_label}")
         set_leverage(base_url, api_key, secret, symbol, leverage)
-        cancel_all_orders(base_url, api_key, secret, symbol)
-
+        
         entry_side = "BUY" if direction == "LONG" else "SELL"
         
         # Anchor the Cycle: Handle manual entry price or fetch mark price
         info = get_symbol_info(base_url, symbol)
         
-        manual_entry = slot.get("entry_price")
+        manual_entry = trade.get("entry_price")
         if manual_entry and float(manual_entry) > 0:
             initial_mark = float(manual_entry)
             add_log(f"Usando Preço de Entrada Manual: {initial_mark}")
@@ -278,24 +297,40 @@ def bot_worker(slot_id: int):
             add_log(f"Preço de Entrada Automático (Mark): {initial_mark}")
         
         intended_notional = usdc_amount * leverage
-        asset_qty = round_step(intended_notional / initial_mark, info["step_size"])
+        min_notional = info.get("min_notional", 0)
+        
+        # Calculate required quantity: Try CLOSEST (rounding) first
+        step = info["step_size"]
+        if step > 0:
+            raw_qty = intended_notional / initial_mark
+            asset_qty = round_step(raw_qty, step)
+            
+            # If closest is below Binance minimum, then and ONLY THEN round up
+            if (asset_qty * initial_mark) < min_notional:
+                asset_qty = math.ceil(min_notional / initial_mark / step) * step
+            
+            # Final rounding for precision
+            asset_qty = float(f"%.{info['qp']}f" % asset_qty)
+        else:
+            asset_qty = intended_notional / initial_mark
+        
         entry_price_r = round_step(initial_mark, info["tick_size"])
         
         # Constraint Checks (Done once at start)
         if asset_qty < info["min_qty"]:
             add_log(f"Erro: Quantia ${usdc_amount} com {leverage}x muito baixa. Mínimo para {symbol} é {info['min_qty']} (~${round(info['min_qty'] * initial_mark, 2)})")
-            slot["status"] = "error"
+            trade["status"] = "error"
             return
         
         actual_notional = asset_qty * entry_price_r
         if actual_notional < info["min_notional"]:
             add_log(f"Erro: Valor Total ${round(actual_notional, 2)} abaixo do mínimo da Binance (${info['min_notional']}). Aumente a margem ou alavancagem.")
-            slot["status"] = "error"
+            trade["status"] = "error"
             return
 
         # Initialize Cycle Loop
         cycle = 0
-        while slot.get("running"):
+        while trade.get("running"):
             cycle += 1
 
             # ---- Phase 1: entry order ----
@@ -306,19 +341,19 @@ def bot_worker(slot_id: int):
                     base_url, api_key, secret, symbol, entry_side, asset_qty, entry_price_r
                 )
                 order_id = order["orderId"]
-                slot["current_order"] = {
+                trade["current_order"] = {
                     "side": entry_side, "price": entry_price_r, "orderId": order_id,
                 }
             except BinanceAPIError as e:
                 add_log(f"Erro na ordem: {e.msg}")
-                slot["status"] = "error"
+                trade["status"] = "error"
                 return
             except Exception as e:
                 add_log(f"Erro na ordem: {e}")
-                slot["status"] = "error"
+                trade["status"] = "error"
                 return
 
-            fill_ok = _wait_fill(base_url, api_key, secret, symbol, order_id, slot, add_log)
+            fill_ok = _wait_fill_trade(base_url, api_key, secret, symbol, order_id, trade, add_log)
             if not fill_ok:
                 return
             add_log(f"{entry_side} preenchido @ {entry_price_r}")
@@ -338,39 +373,39 @@ def bot_worker(slot_id: int):
                     base_url, api_key, secret, symbol, tp_side, asset_qty, tp_price_r
                 )
                 order_id2 = order2["orderId"]
-                slot["current_order"] = {
+                trade["current_order"] = {
                     "side": tp_side, "price": tp_price_r, "orderId": order_id2,
                 }
             except BinanceAPIError as e:
                 add_log(f"Erro TP: {e.msg}")
-                slot["status"] = "error"
+                trade["status"] = "error"
                 return
             except Exception as e:
                 add_log(f"Erro TP: {e}")
-                slot["status"] = "error"
+                trade["status"] = "error"
                 return
 
-            fill_ok = _wait_fill(base_url, api_key, secret, symbol, order_id2, slot, add_log)
+            fill_ok = _wait_fill_trade(base_url, api_key, secret, symbol, order_id2, trade, add_log)
             if not fill_ok:
                 return
             add_log(f"{tp_side} TP preenchido @ {tp_price_r} ✓ Ciclo {cycle} completo")
-            slot["cycles"] = cycle
+            trade["cycles"] = cycle
 
     except Exception as e:
         add_log(f"Erro fatal: {e}")
-        slot["status"] = "error"
+        trade["status"] = "error"
         return
 
     add_log("Bot parou.")
-    slot["status"] = "stopped"
+    trade["status"] = "stopped"
 
 
-def _wait_fill(
+def _wait_fill_trade(
     base_url: str, api_key: str, secret: str,
-    symbol: str, order_id: int, slot: dict, add_log,
+    symbol: str, order_id: int, trade: dict, add_log,
 ) -> bool:
     consecutive_errors = 0
-    while slot.get("running"):
+    while trade.get("running"):
         time.sleep(3)
         try:
             status = get_order_status(base_url, api_key, secret, symbol, order_id)
@@ -379,21 +414,22 @@ def _wait_fill(
                 return True
             if status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED"):
                 add_log(f"Ordem {order_id} status inesperado: {status}")
-                slot["status"] = "error"
+                trade["status"] = "error"
                 return False
         except Exception as e:
             consecutive_errors += 1
             add_log(f"Erro ao verificar ordem: {e}")
             if consecutive_errors >= 10:
                 add_log("Muitos erros seguidos, parando.")
-                slot["status"] = "error"
+                trade["status"] = "error"
                 return False
             time.sleep(5)
 
-    cancel_all_orders(base_url, api_key, secret, symbol)
-    add_log("Parado – ordens abertas canceladas.")
-    slot["status"] = "stopped"
+    cancel_order(base_url, api_key, secret, symbol, order_id)
+    add_log("Parado – ordem cancelada.")
+    trade["status"] = "stopped"
     return False
+
 
 
 # ---------------------------------------------------------------------------
@@ -446,28 +482,50 @@ def api_balance():
         return jsonify({"error": str(e)}), 500
 
 
+def get_slots_data():
+    out_slots = []
+    for i in range(4):
+        creds = api_credentials[i]
+        slot_trades = []
+        for tid, t in active_trades.items():
+            if t.get("slot_id") == i:
+                slot_trades.append({
+                    "trade_id": tid,
+                    "symbol": t.get("symbol"),
+                    "direction": t.get("direction"),
+                    "pct": t.get("pct"),
+                    "qty": t.get("qty"),
+                    "leverage": t.get("leverage"),
+                    "mode": t.get("mode", "live"),
+                    "status": t.get("status", "unknown"),
+                    "cycles": t.get("cycles", 0),
+                    "current_order": t.get("current_order"),
+                    "log": (t.get("log") or [])[-20:],
+                })
+        
+        out_slots.append({
+            "slot_id": i,
+            "connected": creds is not None,
+            "trades": slot_trades
+        })
+    return out_slots
+
+
 @app.route("/api/status")
 def api_status():
-    out = []
-    for i in range(4):
-        s = slots[i]
-        if s is None:
-            out.append({"active": False})
-        else:
-            out.append({
-                "active": True,
-                "symbol": s.get("symbol"),
-                "direction": s.get("direction"),
-                "pct": s.get("pct"),
-                "qty": s.get("qty"),
-                "leverage": s.get("leverage"),
-                "mode": s.get("mode", "live"),
-                "status": s.get("status", "unknown"),
-                "cycles": s.get("cycles", 0),
-                "current_order": s.get("current_order"),
-                "log": (s.get("log") or [])[-20:],
-            })
-    return jsonify(out)
+    """Return all active trades and API key persistence info."""
+    return jsonify(get_slots_data())
+
+
+@app.route("/api/events")
+def api_events():
+    def event_stream():
+        while True:
+            data = get_slots_data()
+            yield f"data: {json.dumps(data)}\n\n"
+            time.sleep(1)
+            
+    return Response(event_stream(), mimetype="text/event-stream")
 
 
 @app.route("/api/start", methods=["POST"])
@@ -484,6 +542,7 @@ def api_start():
     if not 0 <= slot_id <= 3:
         return jsonify({"error": "Slot inválido (0-3)"}), 400
 
+    # Required fields
     for field in ("api_key", "secret", "symbol", "direction", "pct", "qty"):
         val = data.get(field)
         if val is None or (isinstance(val, str) and not str(val).strip()):
@@ -496,46 +555,43 @@ def api_start():
     except (ValueError, TypeError) as e:
         return jsonify({"error": f"Valor numérico inválido: {e}"}), 400
 
-    if pct <= 0:
-        return jsonify({"error": "Porcentagem deve ser > 0"}), 400
-    if qty <= 0:
-        return jsonify({"error": "Quantidade deve ser > 0"}), 400
-    if not 1 <= leverage <= 125:
-        return jsonify({"error": "Alavancagem deve ser entre 1 e 125"}), 400
-
     direction = data["direction"].strip().upper()
-    if direction not in ("LONG", "SHORT"):
-        return jsonify({"error": "Direção deve ser LONG ou SHORT"}), 400
-
     mode = (data.get("mode") or "live").strip().lower()
     base_url = URL_TESTNET if mode == "demo" else URL_LIVE
 
-    with slot_locks[slot_id]:
-        if slots[slot_id] and slots[slot_id].get("running"):
-            return jsonify({"error": "Slot já está rodando. Pare primeiro."}), 400
+    # Store credentials for the slot
+    api_credentials[slot_id] = {
+        "api_key": data["api_key"].strip(),
+        "secret": data["secret"].strip(),
+        "mode": mode
+    }
 
-        slots[slot_id] = {
-            "api_key": data["api_key"].strip(),
-            "secret": data["secret"].strip(),
-            "symbol": data["symbol"].strip().upper(),
-            "direction": direction,
-            "pct": pct,
-            "qty": qty,
-            "leverage": leverage,
-            "mode": mode,
-            "base_url": base_url,
-            "entry_price": data.get("entry_price"),
-            "running": True,
-            "status": "starting",
-            "cycles": 0,
-            "log": [],
-            "current_order": None,
-        }
+    trade_id = f"slot{slot_id}_{uuid.uuid4().hex[:6]}"
+    
+    active_trades[trade_id] = {
+        "trade_id": trade_id,
+        "slot_id": slot_id,
+        "api_key": data["api_key"].strip(),
+        "secret": data["secret"].strip(),
+        "symbol": data["symbol"].strip().upper(),
+        "direction": direction,
+        "pct": pct,
+        "qty": qty,
+        "leverage": leverage,
+        "mode": mode,
+        "base_url": base_url,
+        "entry_price": data.get("entry_price"),
+        "running": True,
+        "status": "starting",
+        "cycles": 0,
+        "log": [],
+        "current_order": None,
+    }
 
-        t = threading.Thread(target=bot_worker, args=(slot_id,), daemon=True)
-        t.start()
+    t = threading.Thread(target=bot_worker, args=(trade_id,), daemon=True)
+    t.start()
 
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "trade_id": trade_id})
 
 
 @app.route("/api/stop", methods=["POST"])
@@ -543,18 +599,17 @@ def api_stop():
     data = request.json
     if not data:
         return jsonify({"error": "Corpo da requisição vazio"}), 400
-    try:
-        slot_id = int(data.get("slot", -1))
-    except (ValueError, TypeError):
-        return jsonify({"error": "Slot inválido"}), 400
+    
+    trade_id = data.get("trade_id")
+    if not trade_id:
+        return jsonify({"error": "trade_id obrigatório"}), 400
 
-    if not 0 <= slot_id <= 3:
-        return jsonify({"error": "Slot inválido"}), 400
+    if trade_id in active_trades:
+        active_trades[trade_id]["running"] = False
+        return jsonify({"ok": True})
+    
+    return jsonify({"error": "Trade não encontrado"}), 404
 
-    with slot_locks[slot_id]:
-        if slots[slot_id]:
-            slots[slot_id]["running"] = False
-    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
