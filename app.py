@@ -10,7 +10,6 @@ import hashlib
 import threading
 import logging
 import uuid
-import math
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -132,49 +131,47 @@ def get_symbol_info(base_url: str, symbol: str) -> dict:
     cache_key = f"{base_url}:{symbol}"
     if cache_key in _symbol_info_cache:
         return _symbol_info_cache[cache_key]
-    
+
     r = requests.get(f"{base_url}/fapi/v1/exchangeInfo", timeout=15)
     r.raise_for_status()
     for s in r.json()["symbols"]:
         if s["symbol"] == symbol:
+            if s.get("contractType") != "PERPETUAL":
+                raise ValueError(f"{symbol} is not a perpetual futures contract (type: {s.get('contractType')})")
             info = {
                 "pp": s["pricePrecision"],
                 "qp": s["quantityPrecision"],
                 "tick_size": 0.0,
                 "min_qty": 0.0,
+                "max_qty": 0.0,
                 "step_size": 0.0,
-                "min_notional": 0.0
+                "min_notional": 0.0,
             }
             for f in s["filters"]:
                 if f["filterType"] == "PRICE_FILTER":
                     info["tick_size"] = float(f["tickSize"])
                 elif f["filterType"] == "LOT_SIZE":
                     info["min_qty"] = float(f["minQty"])
+                    info["max_qty"] = float(f["maxQty"])
                     info["step_size"] = float(f["stepSize"])
                 elif f["filterType"] == "MIN_NOTIONAL":
                     info["min_notional"] = float(f.get("notional", 0) or f.get("minNotional", 0))
-            
+
             _symbol_info_cache[cache_key] = info
             return info
     raise ValueError(f"Symbol {symbol} not found on Binance Futures")
 
 
-def round_step(value: float, step: float) -> float:
-    """Round a value to the nearest multiple of step without floating point errors."""
+
+def round_step(value: float, step: float, precision: int) -> float:
+    """Round value to the nearest step multiple, formatted to Binance's precision."""
     if not step:
-        return value
-    # Use decimal-like precision for step rounding
-    precision = len(str(step).split('.')[-1]) if '.' in str(step) else 0
+        return round(value, precision)
     rounded = round(round(value / step) * step, precision)
+    # Guard: step coarser than value (e.g. testnet tick=1, price=0.09) → rounds to 0
+    if rounded <= 0 < value:
+        return round(value, precision)
     return rounded
-
-
-def round_price(price: float, precision: int) -> float:
-    return float(f"%.{precision}f" % price)
-
-
-def round_qty(qty: float, precision: int) -> float:
-    return float(f"%.{precision}f" % qty)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +199,7 @@ def get_account_balance(base_url: str, api_key: str, secret: str) -> list:
 def place_limit_order(
     base_url: str, api_key: str, secret: str,
     symbol: str, side: str, qty: float, price: float,
+    reduce_only: bool = False, position_side: str = None,
 ) -> dict:
     params = {
         "symbol": symbol,
@@ -211,6 +209,30 @@ def place_limit_order(
         "quantity": qty,
         "price": price,
     }
+    if position_side:
+        # Hedge mode: positionSide drives open/close — reduceOnly must not be sent
+        params["positionSide"] = position_side
+    elif reduce_only:
+        params["reduceOnly"] = "true"
+    return bn_post(base_url, "/fapi/v1/order", params, api_key, secret)
+
+
+def place_market_close_order(
+    base_url: str, api_key: str, secret: str,
+    symbol: str, side: str, qty: float,
+    position_side: str = None,
+) -> dict:
+    """Market order to close an open position."""
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": qty,
+    }
+    if position_side:
+        params["positionSide"] = position_side
+    else:
+        params["reduceOnly"] = "true"
     return bn_post(base_url, "/fapi/v1/order", params, api_key, secret)
 
 
@@ -239,11 +261,27 @@ def get_order_status(
     return data["status"]
 
 
-def set_leverage(base_url: str, api_key: str, secret: str, symbol: str, leverage: int):
-    try:
-        bn_post(base_url, "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, api_key, secret)
-    except Exception:
-        pass
+def get_current_leverage(base_url: str, api_key: str, secret: str, symbol: str) -> int:
+    """Read the leverage currently set on Binance for this symbol (never changes it)."""
+    data = bn_get(base_url, "/fapi/v2/positionRisk", {"symbol": symbol}, api_key, secret)
+    for pos in data:
+        if pos.get("symbol") == symbol:
+            return int(float(pos.get("leverage", 1)))
+    return 1
+
+
+_position_mode_cache: dict = {}
+
+
+def get_position_mode(base_url: str, api_key: str, secret: str) -> bool:
+    """Return True if the account is in hedge mode (dualSidePosition), False for one-way."""
+    cache_key = f"{base_url}:{api_key}"
+    if cache_key in _position_mode_cache:
+        return _position_mode_cache[cache_key]
+    data = bn_get(base_url, "/fapi/v1/positionSide/dual", {}, api_key, secret)
+    hedge = bool(data.get("dualSidePosition", False))
+    _position_mode_cache[cache_key] = hedge
+    return hedge
 
 
 # ---------------------------------------------------------------------------
@@ -264,10 +302,9 @@ def bot_worker(trade_id: str):
     direction = trade["direction"]
     pct = trade["pct"]
     usdc_amount = trade["qty"]
-    leverage = trade["leverage"]
     mode_label = "TESTNET" if base_url == URL_TESTNET else "LIVE"
 
-    log.info(f"[{trade_id}] Starting ({mode_label}): {symbol} {direction} {pct}% amount=${usdc_amount} USDC lev={leverage}x")
+    log.info(f"[{trade_id}] Starting ({mode_label}): {symbol} {direction} {pct}% amount=${usdc_amount} USDC")
     trade["status"] = "running"
     trade["log"] = []
 
@@ -281,8 +318,17 @@ def bot_worker(trade_id: str):
 
     try:
         add_log(f"Modo: {mode_label}")
-        set_leverage(base_url, api_key, secret, symbol, leverage)
-        
+
+        # Read leverage from Binance — never set it
+        leverage = get_current_leverage(base_url, api_key, secret, symbol)
+        trade["leverage"] = leverage
+        add_log(f"Alavancagem na Binance: {leverage}x")
+
+        hedge_mode = get_position_mode(base_url, api_key, secret)
+        # In hedge mode positionSide must be set; in one-way mode leave it None
+        position_side = ("LONG" if direction == "LONG" else "SHORT") if hedge_mode else None
+        add_log(f"Modo de posição: {'Hedge' if hedge_mode else 'One-Way'}")
+
         entry_side = "BUY" if direction == "LONG" else "SELL"
         
         # Anchor the Cycle: Handle manual entry price or fetch mark price
@@ -291,40 +337,40 @@ def bot_worker(trade_id: str):
         manual_entry = trade.get("entry_price")
         if manual_entry and float(manual_entry) > 0:
             initial_mark = float(manual_entry)
+            entry_price_r = round_step(initial_mark, info["tick_size"], info["pp"])
+            if abs(entry_price_r - initial_mark) > 1e-8:
+                tick = info["tick_size"]
+                add_log(f"Erro: Preço {initial_mark} não é múltiplo válido do tick_size ({tick}). "
+                        f"Use {entry_price_r} ou {round_step(initial_mark + tick, tick, info['pp'])}.")
+                trade["status"] = "error"
+                return
             add_log(f"Usando Preço de Entrada Manual: {initial_mark}")
         else:
             initial_mark = get_mark_price(base_url, symbol)
-            add_log(f"Preço de Entrada Automático (Mark): {initial_mark}")
-        
+            entry_price_r = round_step(initial_mark, info["tick_size"], info["pp"])
+            add_log(f"Preço de Entrada Automático (Mark): {entry_price_r}")
+
         intended_notional = usdc_amount * leverage
         min_notional = info.get("min_notional", 0)
-        
-        # Calculate required quantity: Try CLOSEST (rounding) first
-        step = info["step_size"]
-        if step > 0:
-            raw_qty = intended_notional / initial_mark
-            asset_qty = round_step(raw_qty, step)
-            
-            # If closest is below Binance minimum, then and ONLY THEN round up
-            if (asset_qty * initial_mark) < min_notional:
-                asset_qty = math.ceil(min_notional / initial_mark / step) * step
-            
-            # Final rounding for precision
-            asset_qty = float(f"%.{info['qp']}f" % asset_qty)
-        else:
-            asset_qty = intended_notional / initial_mark
-        
-        entry_price_r = round_step(initial_mark, info["tick_size"])
-        
-        # Constraint Checks (Done once at start)
+
+        raw_qty = intended_notional / initial_mark
+        asset_qty = round_step(raw_qty, info["step_size"], info["qp"])
+
+        # Validate qty against Binance's LOT_SIZE bounds
         if asset_qty < info["min_qty"]:
-            add_log(f"Erro: Quantia ${usdc_amount} com {leverage}x muito baixa. Mínimo para {symbol} é {info['min_qty']} (~${round(info['min_qty'] * initial_mark, 2)})")
+            min_margin = round(info["min_qty"] * initial_mark / leverage, 2)
+            add_log(f"Erro: Quantidade {asset_qty} abaixo do mínimo {info['min_qty']}. Margem mínima necessária: ${min_margin} com {leverage}x.")
             trade["status"] = "error"
             return
-        
-        actual_notional = asset_qty * entry_price_r
-        if actual_notional < info["min_notional"]:
-            add_log(f"Erro: Valor Total ${round(actual_notional, 2)} abaixo do mínimo da Binance (${info['min_notional']}). Aumente a margem ou alavancagem.")
+
+        if info["max_qty"] > 0 and asset_qty > info["max_qty"]:
+            add_log(f"Erro: Quantidade {asset_qty} excede o máximo {info['max_qty']} para {symbol}. Reduza a margem ou alavancagem.")
+            trade["status"] = "error"
+            return
+
+        if min_notional > 0 and intended_notional < min_notional:
+            min_margin = round(min_notional / leverage, 2)
+            add_log(f"Erro: ${usdc_amount} × {leverage}x = ${intended_notional} abaixo do mínimo Binance (${min_notional}). Aumente a margem para ${min_margin}.")
             trade["status"] = "error"
             return
 
@@ -335,10 +381,11 @@ def bot_worker(trade_id: str):
 
             # ---- Phase 1: entry order ----
             add_log(f"Ciclo {cycle}: {entry_side} {asset_qty} @ {entry_price_r}")
-            add_log(f"-> Margem: ${usdc_amount} | Alavancagem: {leverage}x | Total Est.: ${round(actual_notional, 2)}")
+            add_log(f"-> Margem: ${usdc_amount} | Alavancagem: {leverage}x | Notional: ${round(usdc_amount * leverage, 2)}")
             try:
                 order = place_limit_order(
-                    base_url, api_key, secret, symbol, entry_side, asset_qty, entry_price_r
+                    base_url, api_key, secret, symbol, entry_side, asset_qty, entry_price_r,
+                    position_side=position_side,
                 )
                 order_id = order["orderId"]
                 trade["current_order"] = {
@@ -366,11 +413,12 @@ def bot_worker(trade_id: str):
                 tp_price = entry_price_r * (1 - pct / 100)
                 tp_side = "BUY"
 
-            tp_price_r = round_step(tp_price, info["tick_size"])
+            tp_price_r = round_step(tp_price, info["tick_size"], info["pp"])
             add_log(f"Ciclo {cycle}: {tp_side} TP limit {asset_qty} @ {tp_price_r}")
             try:
                 order2 = place_limit_order(
-                    base_url, api_key, secret, symbol, tp_side, asset_qty, tp_price_r
+                    base_url, api_key, secret, symbol, tp_side, asset_qty, tp_price_r,
+                    reduce_only=True, position_side=position_side,
                 )
                 order_id2 = order2["orderId"]
                 trade["current_order"] = {
@@ -385,7 +433,11 @@ def bot_worker(trade_id: str):
                 trade["status"] = "error"
                 return
 
-            fill_ok = _wait_fill_trade(base_url, api_key, secret, symbol, order_id2, trade, add_log)
+            fill_ok = _wait_fill_trade(
+                base_url, api_key, secret, symbol, order_id2, trade, add_log,
+                close_on_stop=True, close_side=tp_side, close_qty=asset_qty,
+                position_side=position_side,
+            )
             if not fill_ok:
                 return
             add_log(f"{tp_side} TP preenchido @ {tp_price_r} ✓ Ciclo {cycle} completo")
@@ -403,6 +455,8 @@ def bot_worker(trade_id: str):
 def _wait_fill_trade(
     base_url: str, api_key: str, secret: str,
     symbol: str, order_id: int, trade: dict, add_log,
+    close_on_stop: bool = False, close_side: str = None, close_qty: float = None,
+    position_side: str = None,
 ) -> bool:
     consecutive_errors = 0
     while trade.get("running"):
@@ -425,8 +479,19 @@ def _wait_fill_trade(
                 return False
             time.sleep(5)
 
+    # Stop was requested — cancel the open order first
     cancel_order(base_url, api_key, secret, symbol, order_id)
     add_log("Parado – ordem cancelada.")
+
+    # If entry was already filled (Phase 2), close the open position at market price
+    if close_on_stop and close_side and close_qty:
+        try:
+            place_market_close_order(base_url, api_key, secret, symbol, close_side, close_qty,
+                                     position_side=position_side)
+            add_log(f"Posição fechada a mercado ({close_side} {close_qty}).")
+        except Exception as e:
+            add_log(f"AVISO: Falha ao fechar posição automaticamente – feche manualmente! Erro: {e}")
+
     trade["status"] = "stopped"
     return False
 
@@ -457,9 +522,81 @@ def api_server_ip():
     return jsonify({"ip": api_server_ip._cached})
 
 
+def _stop_and_clear_slot(slot_id: int):
+    """Stop all running trades for a slot and remove them from active_trades."""
+    to_remove = [tid for tid, t in active_trades.items() if t.get("slot_id") == slot_id]
+    for tid in to_remove:
+        active_trades[tid]["running"] = False
+    for tid in to_remove:
+        active_trades.pop(tid, None)
+
+
+@app.route("/api/connect", methods=["POST"])
+def api_connect():
+    """Switch API credentials for a slot: stop all existing trades, then fetch balance."""
+    data = request.json
+    if not data:
+        return jsonify({"error": "empty body"}), 400
+
+    try:
+        slot_id = int(data["slot"])
+    except (KeyError, ValueError, TypeError):
+        return jsonify({"error": "Slot inválido"}), 400
+
+    if not 0 <= slot_id <= 3:
+        return jsonify({"error": "Slot inválido (0-3)"}), 400
+
+    api_key = (data.get("api_key") or "").strip()
+    secret = (data.get("secret") or "").strip()
+    mode = (data.get("mode") or "live").strip().lower()
+
+    if not api_key or not secret:
+        return jsonify({"error": "API Key e Secret são obrigatórios"}), 400
+
+    base_url = URL_TESTNET if mode == "demo" else URL_LIVE
+
+    # Stop & clear all trades for this slot before switching credentials
+    _stop_and_clear_slot(slot_id)
+    api_credentials[slot_id] = {"api_key": api_key, "secret": secret, "mode": mode}
+    save_settings()
+
+    try:
+        balances = get_account_balance(base_url, api_key, secret)
+        return jsonify({"ok": True, "balances": balances, "mode": mode})
+    except BinanceAPIError as e:
+        api_credentials[slot_id] = None
+        save_settings()
+        return jsonify({"error": e.msg}), 400
+    except Exception as e:
+        api_credentials[slot_id] = None
+        save_settings()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/clear-slot", methods=["POST"])
+def api_clear_slot():
+    """Stop all trades for a slot and clear its credentials (used on mode toggle)."""
+    data = request.json
+    if not data:
+        return jsonify({"error": "empty body"}), 400
+
+    try:
+        slot_id = int(data["slot"])
+    except (KeyError, ValueError, TypeError):
+        return jsonify({"error": "Slot inválido"}), 400
+
+    if not 0 <= slot_id <= 3:
+        return jsonify({"error": "Slot inválido (0-3)"}), 400
+
+    _stop_and_clear_slot(slot_id)
+    api_credentials[slot_id] = None
+    save_settings()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/balance", methods=["POST"])
 def api_balance():
-    """Fetch USDT balance for a given API key pair. Used by the dashboard."""
+    """Fetch balance for a given API key pair (read-only, no side effects)."""
     data = request.json
     if not data:
         return jsonify({"error": "empty body"}), 400
@@ -506,6 +643,9 @@ def get_slots_data():
         out_slots.append({
             "slot_id": i,
             "connected": creds is not None,
+            "api_key": creds["api_key"] if creds else None,
+            "secret": creds["secret"] if creds else None,
+            "mode": creds["mode"] if creds else "live",
             "trades": slot_trades
         })
     return out_slots
@@ -551,7 +691,6 @@ def api_start():
     try:
         pct = float(data["pct"])
         qty = float(data["qty"])
-        leverage = int(data.get("leverage", 10))
     except (ValueError, TypeError) as e:
         return jsonify({"error": f"Valor numérico inválido: {e}"}), 400
 
@@ -577,7 +716,7 @@ def api_start():
         "direction": direction,
         "pct": pct,
         "qty": qty,
-        "leverage": leverage,
+        "leverage": None,
         "mode": mode,
         "base_url": base_url,
         "entry_price": data.get("entry_price"),
@@ -588,7 +727,14 @@ def api_start():
         "current_order": None,
     }
 
-    t = threading.Thread(target=bot_worker, args=(trade_id,), daemon=True)
+    def _run_and_cleanup():
+        try:
+            bot_worker(trade_id)
+        finally:
+            time.sleep(5)
+            active_trades.pop(trade_id, None)
+
+    t = threading.Thread(target=_run_and_cleanup, daemon=True)
     t.start()
 
     return jsonify({"ok": True, "trade_id": trade_id})
@@ -611,6 +757,38 @@ def api_stop():
     return jsonify({"error": "Trade não encontrado"}), 404
 
 
+
+# ---------------------------------------------------------------------------
+# Settings persistence
+# ---------------------------------------------------------------------------
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            data = json.load(f)
+        for i, creds in enumerate(data.get("slots", [])[:4]):
+            if creds:
+                api_credentials[i] = creds
+        log.info("Settings loaded from settings.json")
+    except Exception as e:
+        log.warning(f"Could not load settings.json: {e}")
+
+
+def save_settings():
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump({"slots": api_credentials}, f, indent=2)
+        log.info(f"Settings saved to {SETTINGS_FILE}")
+    except Exception as e:
+        log.warning(f"Could not save settings.json: {e}")
+
+
+# Load persisted credentials at import time (works with both python app.py and gunicorn)
+load_settings()
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
